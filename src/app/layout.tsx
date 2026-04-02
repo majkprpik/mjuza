@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Mjuzadosuza",
+  title: "Mjuza Do Suza(2)",
   description: "Shared YouTube jukebox",
 };
 
