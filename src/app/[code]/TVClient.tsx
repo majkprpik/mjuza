@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import YouTube, { YouTubeEvent } from "react-youtube";
-import { supabase, Song } from "@/lib/supabase";
+import { supabase, Song, Room } from "@/lib/supabase";
 import {
   DndContext,
   closestCenter,
@@ -93,7 +93,9 @@ function SortableItem({
         <p className={`text-[13px] font-semibold truncate leading-tight ${isPlaying ? "text-[#1db954]" : "text-white/90"}`}>
           {song.title}
         </p>
-        {isPlaying && <p className="text-[11px] text-[#1db954]/60 mt-0.5">Svira</p>}
+        {song.added_by_name && (
+          <p className="text-[11px] text-white/25 truncate mt-0.5">{song.added_by_name}</p>
+        )}
       </div>
 
       <button
@@ -111,7 +113,8 @@ function SortableItem({
   );
 }
 
-export default function TVPage() {
+export default function TVClient({ roomCode }: { roomCode: string }) {
+  const [room, setRoom] = useState<Room | null>(null);
   const [songs, setSongs] = useState<Song[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const playerRef = useRef<any>(null);
@@ -121,22 +124,52 @@ export default function TVPage() {
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
   );
 
+  // Fetch room
+  useEffect(() => {
+    supabase
+      .from("rooms")
+      .select("*")
+      .eq("code", roomCode)
+      .single()
+      .then(({ data }) => {
+        if (data) setRoom(data);
+      });
+  }, [roomCode]);
+
   const fetchSongs = useCallback(async () => {
+    if (!room) return;
     const { data } = await supabase
       .from("songs")
       .select("*")
+      .eq("room_id", room.id)
       .order("order", { ascending: true });
     if (data) setSongs(data);
-  }, []);
+  }, [room]);
 
   useEffect(() => {
+    if (!room) return;
     fetchSongs();
     const channel = supabase
-      .channel("songs-realtime")
-      .on("postgres_changes", { event: "*", schema: "public", table: "songs" }, () => fetchSongs())
+      .channel(`songs-room-${room.id}`)
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "songs", filter: `room_id=eq.${room.id}` },
+        () => fetchSongs()
+      )
       .subscribe();
-    return () => { supabase.removeChannel(channel); };
-  }, [fetchSongs]);
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [room, fetchSongs]);
+
+  // Update now_playing_song_id when current song changes
+  useEffect(() => {
+    if (!room) return;
+    const currentSong = songs[currentIndex];
+    if (currentSong) {
+      supabase.from("rooms").update({ now_playing_song_id: currentSong.id }).eq("id", room.id);
+    }
+  }, [currentIndex, songs, room]);
 
   useEffect(() => {
     if (currentIndex >= songs.length && songs.length > 0) setCurrentIndex(0);
@@ -159,8 +192,25 @@ export default function TVPage() {
     const newIndex = songs.findIndex((s) => s.id === over.id);
     const reordered = arrayMove(songs, oldIndex, newIndex);
     setSongs(reordered);
-    await Promise.all(reordered.map((song, i) => supabase.from("songs").update({ order: i }).eq("id", song.id)));
+    await Promise.all(
+      reordered.map((song, i) =>
+        supabase.from("songs").update({ order: i }).eq("id", song.id)
+      )
+    );
   };
+
+  const addPageUrl =
+    typeof window !== "undefined"
+      ? `${window.location.origin}/${roomCode}/add`
+      : "";
+
+  if (!room) {
+    return (
+      <div className="h-screen flex items-center justify-center bg-[#0a0a0a] text-white/30">
+        Ucitavam...
+      </div>
+    );
+  }
 
   return (
     <div className="h-screen flex flex-col bg-[#0a0a0a] text-white overflow-hidden">
@@ -169,19 +219,36 @@ export default function TVPage() {
         {/* Player area */}
         <div className="flex-1 flex flex-col bg-gradient-to-b from-[#1a1a2e]/50 to-[#0a0a0a]">
           {/* Header */}
-          <div className="px-8 pt-6 pb-2 flex items-center gap-3">
-            <div className="w-9 h-9 bg-[#1db954] rounded-xl flex items-center justify-center shadow-lg shadow-[#1db954]/20">
-              <svg width="16" height="16" viewBox="0 0 16 16" fill="white">
-                <path d="M3 1.713a.7.7 0 011.05-.607l10.89 6.288a.7.7 0 010 1.212L4.05 14.894A.7.7 0 013 14.288V1.713z" />
-              </svg>
+          <div className="px-8 pt-6 pb-2 flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 bg-[#1db954] rounded-xl flex items-center justify-center shadow-lg shadow-[#1db954]/20">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="white">
+                  <path d="M3 1.713a.7.7 0 011.05-.607l10.89 6.288a.7.7 0 010 1.212L4.05 14.894A.7.7 0 013 14.288V1.713z" />
+                </svg>
+              </div>
+              <div>
+                <h1 className="text-lg font-bold tracking-tight leading-tight">{room.name}</h1>
+                <p className="text-[11px] text-white/30">Kod: {roomCode}</p>
+              </div>
             </div>
-            <div>
-              <h1 className="text-lg font-bold tracking-tight leading-tight">Mjuza Do Suza(2)</h1>
-              <p className="text-[11px] text-white/30">Shared jukebox</p>
-            </div>
+
+            {/* QR Code */}
+            {addPageUrl && (
+              <div className="flex items-center gap-4 bg-white/[0.04] rounded-xl px-4 py-3 ring-1 ring-white/[0.06]">
+                <div className="text-right">
+                  <p className="text-[11px] text-white/30">Skeniraj ili upiši kod</p>
+                  <p className="text-lg font-bold tracking-[0.2em] text-[#1db954]">{roomCode}</p>
+                </div>
+                <img
+                  src={`https://api.qrserver.com/v1/create-qr-code/?size=80x80&bgcolor=0a0a0a&color=ffffff&data=${encodeURIComponent(addPageUrl)}`}
+                  alt="QR"
+                  className="w-16 h-16 rounded-lg"
+                />
+              </div>
+            )}
           </div>
 
-          {/* Video - takes up most of the space */}
+          {/* Video */}
           <div className="flex-1 flex items-center justify-center p-6">
             {currentSong ? (
               <div className="w-full h-full max-h-[75vh] bg-black rounded-2xl overflow-hidden shadow-2xl shadow-black/80 ring-1 ring-white/[0.06]">
@@ -194,7 +261,9 @@ export default function TVPage() {
                     playerVars: { autoplay: 1, controls: 1 },
                   }}
                   onEnd={handleEnd}
-                  onReady={(e: YouTubeEvent) => { playerRef.current = e.target; }}
+                  onReady={(e: YouTubeEvent) => {
+                    playerRef.current = e.target;
+                  }}
                   className="w-full h-full"
                   iframeClassName="w-full h-full"
                 />
@@ -210,7 +279,9 @@ export default function TVPage() {
                 </div>
                 <div className="text-center">
                   <p className="text-white/30 text-base font-medium">Nema pjesama u redu</p>
-                  <p className="text-white/15 text-sm mt-1">Otvori /user na mobitelu i dodaj</p>
+                  <p className="text-white/15 text-sm mt-1">
+                    Skeniraj QR kod ili idi na /{roomCode}/add
+                  </p>
                 </div>
               </div>
             )}

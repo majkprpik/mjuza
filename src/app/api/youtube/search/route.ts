@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import YouTube from "youtube-sr";
+import yts from "yt-search";
 
 export async function GET(req: NextRequest) {
   const query = req.nextUrl.searchParams.get("q");
@@ -8,12 +8,12 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const results = await YouTube.search(query, { limit: 10, type: "video" });
+    const result = await yts(query);
 
-    const items = results.map((video) => ({
-      videoId: video.id,
+    const items = result.videos.slice(0, 10).map((video) => ({
+      videoId: video.videoId,
       title: video.title || "",
-      thumbnail: video.thumbnail?.url || "",
+      thumbnail: video.thumbnail || "",
     }));
 
     return NextResponse.json({ items });

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev --port 3050",
     "build": "next build",
     "start": "next start",
     "lint": "eslint"
@@ -13,17 +13,20 @@
     "@dnd-kit/sortable": "^10.0.0",
     "@dnd-kit/utilities": "^3.2.2",
     "@supabase/supabase-js": "^2.101.1",
+    "nanoid": "^5.1.7",
     "next": "16.2.2",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "react-youtube": "^10.1.0",
-    "youtube-sr": "^4.3.12"
+    "youtube-sr": "^4.3.12",
+    "yt-search": "^2.13.1"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@types/yt-search": "^2.10.3",
     "eslint": "^9",
     "eslint-config-next": "16.2.2",
     "tailwindcss": "^4",
