@@ -27,6 +27,14 @@ export default function AddClient({ roomCode }: { roomCode: string }) {
   const [editingName, setEditingName] = useState(false);
   const [nameInput, setNameInput] = useState("");
   const [nowPlayingId, setNowPlayingId] = useState<string | null>(null);
+  const [userId, setUserId] = useState<string | null>(null);
+
+  // Check if user is logged in
+  useEffect(() => {
+    supabase.auth.getUser().then(({ data }) => {
+      if (data.user) setUserId(data.user.id);
+    });
+  }, []);
 
   // Fetch room
   useEffect(() => {
@@ -54,10 +62,11 @@ export default function AddClient({ roomCode }: { roomCode: string }) {
           guest_id: guestId,
           display_name: displayName,
           last_seen_at: new Date().toISOString(),
+          user_id: userId,
         },
         { onConflict: "room_id,guest_id" }
       );
-  }, [room, guestId, displayName]);
+  }, [room, guestId, displayName, userId]);
 
   const fetchSongs = useCallback(async () => {
     if (!room) return;

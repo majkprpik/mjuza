@@ -1,8 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import yts from "yt-search";
+import { supabase } from "@/lib/supabase";
 
 const SPOTIFY_CLIENT_ID = process.env.SPOTIFY_CLIENT_ID!;
 const SPOTIFY_CLIENT_SECRET = process.env.SPOTIFY_CLIENT_SECRET!;
+
+function normalizeQuery(q: string): string {
+  return q.trim().toLowerCase().replace(/\s+/g, " ");
+}
 
 let spotifyToken: string | null = null;
 let tokenExpiry = 0;
@@ -52,7 +57,41 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ items: [] });
   }
 
+  const normalized = normalizeQuery(query);
+
   try {
+    // Step 1: Check catalog first
+    const { data: catalogResults } = await supabase
+      .from("song_catalog")
+      .select("*")
+      .eq("is_dead", false)
+      .or(`title.ilike.%${normalized}%,spotify_artist.ilike.%${normalized}%`)
+      .limit(10);
+
+    const catalogItems = (catalogResults || []).map((row) => ({
+      videoId: row.video_id,
+      title: row.title,
+      thumbnail: row.thumbnail,
+      ...(row.spotify_artist
+        ? {
+            spotifyMeta: {
+              artist: row.spotify_artist,
+              trackName: row.spotify_track_name || "",
+              albumArt: row.spotify_album_art || "",
+            },
+          }
+        : {}),
+    }));
+
+    // If catalog has enough results, return immediately
+    if (catalogItems.length >= 10) {
+      return NextResponse.json({ items: catalogItems.slice(0, 10) });
+    }
+
+    // Step 2: Fill remaining slots from APIs
+    const remaining = 10 - catalogItems.length;
+    const seenIds = new Set(catalogItems.map((item) => item.videoId));
+
     const token = await getSpotifyToken();
 
     // Run Spotify search and YouTube search in parallel
@@ -106,13 +145,33 @@ export async function GET(req: NextRequest) {
           ).filter(Boolean)
         : [];
 
-    // Merge: Spotify results first, then YouTube results (deduplicated)
-    const seenIds = new Set(spotifyItems.map((item) => item!.videoId));
+    // Merge API results, excluding what's already in catalog
+    const apiSeenIds = new Set(spotifyItems.map((item) => item!.videoId));
     const uniqueYtItems = ytDirectResults.filter(
-      (item) => !seenIds.has(item.videoId)
+      (item) => !apiSeenIds.has(item.videoId) && !seenIds.has(item.videoId)
     );
-    const items = [...spotifyItems, ...uniqueYtItems].slice(0, 10);
+    const newApiItems = [...spotifyItems, ...uniqueYtItems]
+      .filter((item) => !seenIds.has(item!.videoId))
+      .slice(0, remaining);
 
+    // Step 3: Save new results to catalog (fire-and-forget)
+    if (newApiItems.length > 0) {
+      const catalogRows = newApiItems.map((item) => ({
+        video_id: item!.videoId,
+        title: item!.title,
+        thumbnail: item!.thumbnail || "",
+        spotify_artist: (item as any)?.spotifyMeta?.artist || null,
+        spotify_track_name: (item as any)?.spotifyMeta?.trackName || null,
+        spotify_album_art: (item as any)?.spotifyMeta?.albumArt || null,
+      }));
+
+      supabase
+        .from("song_catalog")
+        .upsert(catalogRows, { onConflict: "video_id" })
+        .then(() => {});
+    }
+
+    const items = [...catalogItems, ...newApiItems].slice(0, 10);
     return NextResponse.json({ items });
   } catch {
     return NextResponse.json({ items: [] });

@@ -2,14 +2,14 @@
 
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
-import { supabase, Room } from "@/lib/supabase";
+import { supabase } from "@/lib/supabase";
 import { getGuestId } from "@/lib/guest-identity";
 import { User } from "@supabase/supabase-js";
 
 export default function LandingClient() {
   const router = useRouter();
   const [user, setUser] = useState<User | null>(null);
-  const [myRooms, setMyRooms] = useState<Room[]>([]);
+  const [checkingAuth, setCheckingAuth] = useState(true);
   const [roomCode, setRoomCode] = useState("");
   const [roomName, setRoomName] = useState("");
   const [creating, setCreating] = useState(false);
@@ -22,32 +22,25 @@ export default function LandingClient() {
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState("");
 
-  // Check session on mount
+  // Check session on mount -- redirect logged in users to dashboard
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => {
-      if (data.user) setUser(data.user);
+      if (data.user) {
+        router.replace("/dashboard");
+      } else {
+        setCheckingAuth(false);
+      }
     });
     const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
-      setUser(session?.user ?? null);
+      if (session?.user) {
+        router.replace("/dashboard");
+      } else {
+        setUser(null);
+        setCheckingAuth(false);
+      }
     });
     return () => listener.subscription.unsubscribe();
-  }, []);
-
-  // Fetch user's rooms
-  useEffect(() => {
-    if (!user) {
-      setMyRooms([]);
-      return;
-    }
-    supabase
-      .from("rooms")
-      .select("*")
-      .eq("owner_id", user.id)
-      .order("created_at", { ascending: false })
-      .then(({ data }) => {
-        if (data) setMyRooms(data);
-      });
-  }, [user]);
+  }, [router]);
 
   const handleAuth = async () => {
     setAuthLoading(true);
@@ -56,28 +49,16 @@ export default function LandingClient() {
       const { error } = await supabase.auth.signUp({ email, password });
       if (error) {
         setAuthError(error.message);
-      } else {
-        setAuthMode(null);
-        setEmail("");
-        setPassword("");
       }
+      // onAuthStateChange will redirect to /dashboard
     } else {
       const { error } = await supabase.auth.signInWithPassword({ email, password });
       if (error) {
         setAuthError(error.message);
-      } else {
-        setAuthMode(null);
-        setEmail("");
-        setPassword("");
       }
+      // onAuthStateChange will redirect to /dashboard
     }
     setAuthLoading(false);
-  };
-
-  const logout = async () => {
-    await supabase.auth.signOut();
-    setUser(null);
-    setMyRooms([]);
   };
 
   const createRoom = async () => {
@@ -111,6 +92,14 @@ export default function LandingClient() {
     router.push(`/${code}/add`);
   };
 
+  if (checkingAuth) {
+    return (
+      <div className="min-h-screen bg-[#0a0a0a] flex items-center justify-center">
+        <div className="w-6 h-6 border-2 border-[#1db954] border-t-transparent rounded-full animate-spin" />
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#0a0a0a] text-white flex items-center justify-center px-5">
       <div className="w-full max-w-sm">
@@ -122,24 +111,11 @@ export default function LandingClient() {
             </svg>
           </div>
           <h1 className="text-2xl font-bold tracking-tight">Mjuza Do Suza</h1>
-          <p className="text-sm text-white/30 mt-1"></p>
         </div>
 
-        {/* Auth bar */}
+        {/* Auth buttons */}
         <div className="mb-8">
-          {user ? (
-            <div className="flex items-center justify-between bg-white/[0.04] rounded-xl px-4 py-3 ring-1 ring-white/[0.06]">
-              <div className="min-w-0">
-                <p className="text-sm font-medium text-white/80 truncate">{user.email}</p>
-              </div>
-              <button
-                onClick={logout}
-                className="text-xs text-white/30 hover:text-white/60 transition-colors ml-3 flex-shrink-0"
-              >
-                Odjavi se
-              </button>
-            </div>
-          ) : authMode ? (
+          {authMode ? (
             <div className="bg-white/[0.04] rounded-xl p-4 ring-1 ring-white/[0.06] space-y-3">
               <input
                 type="email"
@@ -207,43 +183,6 @@ export default function LandingClient() {
             </div>
           )}
         </div>
-
-        {/* My Rooms (logged in only) */}
-        {user && myRooms.length > 0 && (
-          <div className="mb-8">
-            <h2 className="text-[13px] font-bold uppercase tracking-[0.15em] text-white/40 mb-3 px-1">
-              Moje sobe
-            </h2>
-            <div className="space-y-1">
-              {myRooms.map((room) => (
-                <button
-                  key={room.id}
-                  onClick={() => router.push(`/${room.code}`)}
-                  className="w-full flex items-center justify-between p-3.5 rounded-xl hover:bg-white/[0.05] transition-all text-left group"
-                >
-                  <div className="min-w-0">
-                    <p className="text-sm font-medium text-white/90 truncate">{room.name}</p>
-                    <p className="text-[11px] text-white/30 mt-0.5">
-                      {room.code}
-                      {room.archived_at && (
-                        <span className="text-yellow-500/60 ml-2">arhivirana</span>
-                      )}
-                    </p>
-                  </div>
-                  <svg
-                    width="14"
-                    height="14"
-                    viewBox="0 0 16 16"
-                    fill="currentColor"
-                    className="text-white/15 group-hover:text-white/40 transition-colors flex-shrink-0"
-                  >
-                    <path d="M6.22 3.22a.75.75 0 011.06 0l4.25 4.25a.75.75 0 010 1.06l-4.25 4.25a.75.75 0 01-1.06-1.06L9.94 8 6.22 4.28a.75.75 0 010-1.06z" />
-                  </svg>
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
 
         {/* Create Room */}
         <div className="mb-8">

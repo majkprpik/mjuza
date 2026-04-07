@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import YouTube, { YouTubeEvent } from "react-youtube";
 import { supabase, Song, Room } from "@/lib/supabase";
+import { getGuestId, getGuestName } from "@/lib/guest-identity";
 import {
   DndContext,
   closestCenter,
@@ -21,18 +22,31 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 
+type SearchResult = {
+  videoId: string;
+  title: string;
+  thumbnail: string;
+  spotifyMeta?: {
+    artist: string;
+    trackName: string;
+    albumArt: string;
+  };
+};
+
 function SortableItem({
   song,
   isPlaying,
   index,
   onRemove,
   onPlay,
+  compact,
 }: {
   song: Song;
   isPlaying: boolean;
   index: number;
   onRemove: (id: string) => void;
   onPlay: (index: number) => void;
+  compact?: boolean;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition } =
     useSortable({ id: song.id });
@@ -47,7 +61,7 @@ function SortableItem({
       ref={setNodeRef}
       style={style}
       onClick={() => onPlay(index)}
-      className={`group flex items-center gap-3 px-4 py-3 rounded-xl cursor-pointer transition-all duration-200 ${
+      className={`group flex items-center gap-3 ${compact ? "px-3 py-2" : "px-4 py-3"} rounded-xl cursor-pointer transition-all duration-200 ${
         isPlaying
           ? "bg-gradient-to-r from-[#1db954]/20 to-transparent border border-[#1db954]/20"
           : "hover:bg-white/[0.05] border border-transparent"
@@ -85,7 +99,7 @@ function SortableItem({
         <img
           src={song.thumbnail}
           alt=""
-          className="w-11 h-11 rounded-lg object-cover flex-shrink-0 shadow-md"
+          className={`${compact ? "w-9 h-9" : "w-11 h-11"} rounded-lg object-cover flex-shrink-0 shadow-md`}
         />
       )}
 
@@ -117,12 +131,30 @@ export default function TVClient({ roomCode }: { roomCode: string }) {
   const [room, setRoom] = useState<Room | null>(null);
   const [songs, setSongs] = useState<Song[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
+  const [addedIds, setAddedIds] = useState<Set<string>>(new Set());
   const playerRef = useRef<any>(null);
+  const [isMobile, setIsMobile] = useState(false);
+
+  // Mobile search state
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [mobileTab, setMobileTab] = useState<"queue" | "search">("queue");
+  const [guestId] = useState(() => getGuestId());
+  const [guestName] = useState(() => getGuestName());
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
   );
+
+  // Detect mobile
+  useEffect(() => {
+    const check = () => setIsMobile(window.innerWidth < 768);
+    check();
+    window.addEventListener("resize", check);
+    return () => window.removeEventListener("resize", check);
+  }, []);
 
   // Fetch room
   useEffect(() => {
@@ -143,7 +175,10 @@ export default function TVClient({ roomCode }: { roomCode: string }) {
       .select("*")
       .eq("room_id", room.id)
       .order("order", { ascending: true });
-    if (data) setSongs(data);
+    if (data) {
+      setSongs(data);
+      setAddedIds(new Set(data.map((s) => s.youtube_id)));
+    }
   }, [room]);
 
   useEffect(() => {
@@ -171,6 +206,28 @@ export default function TVClient({ roomCode }: { roomCode: string }) {
     }
   }, [currentIndex, songs, room]);
 
+  // Media Session API
+  useEffect(() => {
+    if (!("mediaSession" in navigator)) return;
+    const currentSong = songs[currentIndex];
+    if (!currentSong) return;
+
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: currentSong.title,
+      artist: currentSong.added_by_name || "",
+      artwork: currentSong.thumbnail
+        ? [{ src: currentSong.thumbnail, sizes: "512x512", type: "image/jpeg" }]
+        : [],
+    });
+
+    navigator.mediaSession.setActionHandler("previoustrack", () => {
+      setCurrentIndex((prev) => (prev - 1 + songs.length) % songs.length);
+    });
+    navigator.mediaSession.setActionHandler("nexttrack", () => {
+      setCurrentIndex((prev) => (prev + 1) % songs.length);
+    });
+  }, [currentIndex, songs]);
+
   useEffect(() => {
     if (currentIndex >= songs.length && songs.length > 0) setCurrentIndex(0);
   }, [songs, currentIndex]);
@@ -179,6 +236,16 @@ export default function TVClient({ roomCode }: { roomCode: string }) {
 
   const handleEnd = () => {
     if (songs.length > 0) setCurrentIndex((prev) => (prev + 1) % songs.length);
+  };
+
+  const handleError = () => {
+    if (!currentSong) return;
+    fetch("/api/catalog/report-dead", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ videoId: currentSong.youtube_id }),
+    });
+    handleEnd();
   };
 
   const handleRemove = async (id: string) => {
@@ -199,6 +266,65 @@ export default function TVClient({ roomCode }: { roomCode: string }) {
     );
   };
 
+  // PiP
+  const requestPiP = async () => {
+    try {
+      const iframe = document.querySelector("iframe");
+      if (!iframe) return;
+      // Try the iframe's video element
+      const video = (iframe as any).contentDocument?.querySelector("video") as HTMLVideoElement | null;
+      if (video && video.requestPictureInPicture) {
+        await video.requestPictureInPicture();
+        return;
+      }
+      // Fallback: try Document PiP API
+      if ("documentPictureInPicture" in window) {
+        const pipWindow = await (window as any).documentPictureInPicture.requestWindow({
+          width: 400,
+          height: 225,
+        });
+        const container = pipWindow.document.createElement("div");
+        container.style.cssText = "width:100%;height:100%;background:#000;";
+        const clonedIframe = iframe.cloneNode(true) as HTMLIFrameElement;
+        clonedIframe.style.cssText = "width:100%;height:100%;border:none;";
+        container.appendChild(clonedIframe);
+        pipWindow.document.body.style.margin = "0";
+        pipWindow.document.body.appendChild(container);
+      }
+    } catch {
+      // PiP not supported or blocked
+    }
+  };
+
+  // Mobile search
+  const search = async () => {
+    if (!searchQuery.trim()) return;
+    setSearchLoading(true);
+    try {
+      const res = await fetch(`/api/search?q=${encodeURIComponent(searchQuery)}`);
+      const data = await res.json();
+      setSearchResults(data.items || []);
+    } catch {
+      setSearchResults([]);
+    }
+    setSearchLoading(false);
+  };
+
+  const addSong = async (result: SearchResult) => {
+    if (addedIds.has(result.videoId) || !room) return;
+    const maxOrder = songs.length > 0 ? Math.max(...songs.map((s) => s.order)) : -1;
+    await supabase.from("songs").insert({
+      youtube_id: result.videoId,
+      title: result.title,
+      thumbnail: result.thumbnail,
+      order: maxOrder + 1,
+      room_id: room.id,
+      added_by_guest_id: guestId,
+      added_by_name: guestName,
+    });
+    setAddedIds((prev) => new Set(prev).add(result.videoId));
+  };
+
   const addPageUrl =
     typeof window !== "undefined"
       ? `${window.location.origin}/${roomCode}/add`
@@ -212,6 +338,191 @@ export default function TVClient({ roomCode }: { roomCode: string }) {
     );
   }
 
+  // ==================== MOBILE LAYOUT ====================
+  if (isMobile) {
+    return (
+      <div className="h-screen flex flex-col bg-[#0a0a0a] text-white overflow-hidden">
+        {/* Mini header */}
+        <div className="px-4 pt-4 pb-2 flex items-center justify-between">
+          <div>
+            <h1 className="text-base font-bold tracking-tight">{room.name}</h1>
+            <p className="text-[10px] text-white/30">{roomCode}</p>
+          </div>
+          <button
+            onClick={requestPiP}
+            className="text-white/30 hover:text-white/60 transition-colors p-2 rounded-lg hover:bg-white/5"
+            title="Picture in Picture"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <rect x="2" y="3" width="20" height="14" rx="2" />
+              <rect x="12" y="9" width="8" height="6" rx="1" />
+            </svg>
+          </button>
+        </div>
+
+        {/* Player */}
+        <div className="px-4 pb-2">
+          {currentSong ? (
+            <div className="w-full aspect-video bg-black rounded-xl overflow-hidden ring-1 ring-white/[0.06]">
+              <YouTube
+                key={currentSong.youtube_id}
+                videoId={currentSong.youtube_id}
+                opts={{
+                  width: "100%",
+                  height: "100%",
+                  playerVars: { autoplay: 1, controls: 1, playsinline: 1 },
+                }}
+                onEnd={handleEnd}
+                onError={handleError}
+                onReady={(e: YouTubeEvent) => {
+                  playerRef.current = e.target;
+                }}
+                className="w-full h-full"
+                iframeClassName="w-full h-full"
+              />
+            </div>
+          ) : (
+            <div className="w-full aspect-video bg-[#111]/80 rounded-xl flex items-center justify-center ring-1 ring-white/[0.04]">
+              <p className="text-white/20 text-sm">Nema pjesama</p>
+            </div>
+          )}
+        </div>
+
+        {/* Now playing + controls */}
+        {currentSong && (
+          <div className="px-4 pb-3 flex items-center gap-3">
+            {currentSong.thumbnail && (
+              <img src={currentSong.thumbnail} alt="" className="w-10 h-10 rounded-lg shadow-md" />
+            )}
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-semibold text-white truncate">{currentSong.title}</p>
+              <p className="text-[10px] text-white/30">Svira</p>
+            </div>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => setCurrentIndex((prev) => (prev - 1 + songs.length) % songs.length)}
+                className="text-white/30 hover:text-white transition-colors"
+              >
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                  <path d="M3.3 1a.7.7 0 01.7.7v5.15l9.95-5.744a.7.7 0 011.05.606v12.575a.7.7 0 01-1.05.607L4 9.15v5.15a.7.7 0 01-1.4 0V1.7a.7.7 0 01.7-.7z" />
+                </svg>
+              </button>
+              <button
+                onClick={() => setCurrentIndex((prev) => (prev + 1) % songs.length)}
+                className="text-white/30 hover:text-white transition-colors"
+              >
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+                  <path d="M12.7 1a.7.7 0 00-.7.7v5.15L2.05 1.107A.7.7 0 001 1.712v12.575a.7.7 0 001.05.607L12 9.15v5.15a.7.7 0 001.4 0V1.7a.7.7 0 00-.7-.7z" />
+                </svg>
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Tab switcher */}
+        <div className="px-4 flex gap-1 mb-2">
+          <button
+            onClick={() => setMobileTab("queue")}
+            className={`flex-1 py-2 rounded-lg text-xs font-medium transition-all ${
+              mobileTab === "queue" ? "bg-white/[0.1] text-white" : "text-white/40"
+            }`}
+          >
+            Red ({songs.length})
+          </button>
+          <button
+            onClick={() => setMobileTab("search")}
+            className={`flex-1 py-2 rounded-lg text-xs font-medium transition-all ${
+              mobileTab === "search" ? "bg-white/[0.1] text-white" : "text-white/40"
+            }`}
+          >
+            Dodaj
+          </button>
+        </div>
+
+        {/* Scrollable content */}
+        <div className="flex-1 overflow-y-auto px-2 pb-4">
+          {mobileTab === "queue" ? (
+            <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+              <SortableContext items={songs.map((s) => s.id)} strategy={verticalListSortingStrategy}>
+                {songs.map((song, i) => (
+                  <SortableItem
+                    key={song.id}
+                    song={song}
+                    isPlaying={i === currentIndex}
+                    index={i}
+                    onRemove={handleRemove}
+                    onPlay={setCurrentIndex}
+                    compact
+                  />
+                ))}
+              </SortableContext>
+            </DndContext>
+          ) : (
+            <div className="px-2">
+              {/* Search bar */}
+              <div className="flex gap-2 mb-4">
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && search()}
+                  placeholder="Sto zelis slusati?"
+                  className="flex-1 bg-white/[0.06] rounded-xl px-4 py-3 text-sm text-white placeholder-white/25 outline-none ring-1 ring-white/[0.06] focus:ring-white/15 transition-all"
+                />
+                <button
+                  onClick={search}
+                  disabled={searchLoading}
+                  className="bg-[#1db954] hover:bg-[#1ed760] text-black px-5 py-3 rounded-xl text-sm font-bold disabled:opacity-50 transition-all"
+                >
+                  {searchLoading ? (
+                    <svg className="w-4 h-4 animate-spin" viewBox="0 0 16 16" fill="none">
+                      <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="2" strokeDasharray="28" strokeDashoffset="8" />
+                    </svg>
+                  ) : (
+                    "Trazi"
+                  )}
+                </button>
+              </div>
+
+              {/* Results */}
+              <div className="space-y-1">
+                {searchResults.map((r) => {
+                  const isAdded = addedIds.has(r.videoId);
+                  return (
+                    <button
+                      key={r.videoId}
+                      onClick={() => addSong(r)}
+                      disabled={isAdded}
+                      className={`w-full flex items-center gap-3 p-3 rounded-xl text-left transition-all ${
+                        isAdded ? "opacity-40" : "hover:bg-white/[0.05] active:scale-[0.99]"
+                      }`}
+                    >
+                      <img src={r.thumbnail} alt="" className="w-12 h-12 rounded-lg object-cover shadow-md flex-shrink-0" />
+                      <div className="flex-1 min-w-0">
+                        <span className="block text-[13px] font-medium truncate text-white/90">
+                          {r.spotifyMeta?.trackName || r.title}
+                        </span>
+                        {r.spotifyMeta?.artist && (
+                          <span className="block text-[11px] text-white/40 truncate">
+                            {r.spotifyMeta.artist}
+                          </span>
+                        )}
+                      </div>
+                      {isAdded && (
+                        <span className="text-[#1db954] text-[11px] font-medium flex-shrink-0">Dodano</span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ==================== DESKTOP LAYOUT ====================
   return (
     <div className="h-screen flex flex-col bg-[#0a0a0a] text-white overflow-hidden">
       {/* Main content */}
@@ -236,7 +547,7 @@ export default function TVClient({ roomCode }: { roomCode: string }) {
             {addPageUrl && (
               <div className="flex items-center gap-4 bg-white/[0.04] rounded-xl px-4 py-3 ring-1 ring-white/[0.06]">
                 <div className="text-right">
-                  <p className="text-[11px] text-white/30">Skeniraj ili upiši kod</p>
+                  <p className="text-[11px] text-white/30">Skeniraj ili upisi kod</p>
                   <p className="text-lg font-bold tracking-[0.2em] text-[#1db954]">{roomCode}</p>
                 </div>
                 <img
@@ -261,6 +572,7 @@ export default function TVClient({ roomCode }: { roomCode: string }) {
                     playerVars: { autoplay: 1, controls: 1 },
                   }}
                   onEnd={handleEnd}
+                  onError={handleError}
                   onReady={(e: YouTubeEvent) => {
                     playerRef.current = e.target;
                   }}
@@ -337,6 +649,16 @@ export default function TVClient({ roomCode }: { roomCode: string }) {
           </div>
 
           <div className="flex items-center gap-5">
+            <button
+              onClick={requestPiP}
+              className="text-white/30 hover:text-white transition-colors"
+              title="Picture in Picture"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <rect x="2" y="3" width="20" height="14" rx="2" />
+                <rect x="12" y="9" width="8" height="6" rx="1" />
+              </svg>
+            </button>
             <button
               onClick={() => setCurrentIndex((prev) => (prev - 1 + songs.length) % songs.length)}
               className="text-white/30 hover:text-white transition-colors"
